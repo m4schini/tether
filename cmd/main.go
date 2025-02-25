@@ -50,20 +50,25 @@ func main() {
 	var start time.Time
 	for image := range tether.Start(ctx) {
 		start = time.Now()
-		imageFileName := filepath.Join(*outputDir, fmt.Sprintf("%v.jpg", i))
+		var fileExt = "jpg"
+		if image.MimeType == "image/x-canon-cr3" {
+			fileExt = "cr3"
+		}
+
+		imageFileName := filepath.Join(*outputDir, fmt.Sprintf("%v.%v", i, fileExt))
 		f, err := os.OpenFile(imageFileName, os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
-			logger.Error("failed to create jpeg file", slog.Any("file", imageFileName), slog.Any("err", err))
+			logger.Error("failed to create file", slog.Any("file", imageFileName), slog.Any("err", err))
 			continue
 		}
 
-		_, err = io.Copy(f, bytes.NewReader(image))
+		_, err = io.Copy(f, bytes.NewReader(image.Data))
 		if err != nil {
 			logger.Debug("failed to write image to file", slog.Any("err", err))
 			continue
 		}
 		f.Close()
-		logger.Debug("wrote image to file", slog.Any("file", imageFileName))
+		logger.Error("wrote image to file", slog.Any("file", imageFileName), slog.String("mime", image.MimeType))
 		logger.Info("downloaded and saved photo", slog.Duration("duration", time.Since(start)))
 		i++
 	}

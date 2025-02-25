@@ -7,41 +7,40 @@ package tether
    #include <stdio.h>
 
    // Wait for and capture an event, then download the image to memory.
-   int capture_tethered_event(Camera *camera, GPContext *context, CameraFile **file) {
-       int ret;
-       CameraEventType evType;
-       void *eventData;
-       CameraFilePath *filePath;
+   int capture_tethered_event(Camera *camera, GPContext *context, CameraFile **file, const char **mimeType) {
+		int ret;
+		CameraEventType evType;
+		void *eventData;
+		CameraFilePath *filePath;
 
-       // Allocate a new CameraFile to hold image data in memory
-       ret = gp_file_new(file);
-       if (ret < GP_OK) return ret;
+		ret = gp_file_new(file);
+		if (ret < GP_OK) return ret;
 
-       // Wait for an event from the camera
-       while (1) {
-           // Polling for an event from the camera with a 500ms timeout
-           ret = gp_camera_wait_for_event(camera, 500, &evType, &eventData, context);
-           if (ret < GP_OK) return ret;
+		while (1) {
+			ret = gp_camera_wait_for_event(camera, 500, &evType, &eventData, context);
+			if (ret < GP_OK) return ret;
 
-           if (evType == GP_EVENT_FILE_ADDED) {
-               filePath = (CameraFilePath *)eventData;
+			if (evType == GP_EVENT_FILE_ADDED) {
+				filePath = (CameraFilePath *)eventData;
 
-               // Retrieve the file data in memory
-               ret = gp_camera_file_get(camera, filePath->folder, filePath->name, GP_FILE_TYPE_NORMAL, *file, context);
-               if (ret < GP_OK) {
-                   gp_file_free(*file);
-                   return ret;
-               }
+				ret = gp_camera_file_get(camera, filePath->folder, filePath->name, GP_FILE_TYPE_NORMAL, *file, context);
+				if (ret < GP_OK) {
+					gp_file_free(*file);
+					return ret;
+				}
 
-               // Optionally delete the file from the camera after download
-               // ret = gp_camera_file_delete(camera, filePath->folder, filePath->name, context);
-               // if (ret < GP_OK) return ret;
+				// Retrieve MIME type
+				ret = gp_file_get_mime_type(*file, mimeType);
+				if (ret < GP_OK) {
+					gp_file_free(*file);
+					return ret;
+				}
 
-               return GP_OK;
-           }
-       }
-       return GP_OK;
-   }
+				return GP_OK;
+			}
+		}
+		return GP_OK;
+}
 
    // Error handling utility function
    void check_error(int err_code) {
@@ -69,8 +68,13 @@ var (
 	CameraTetherFailedErr = errors.New("tether failed")
 )
 
-func Start(ctx context.Context) <-chan []byte {
-	photos := make(chan []byte, 32)
+type Capture struct {
+	Data     []byte
+	MimeType string
+}
+
+func Start(ctx context.Context) <-chan Capture {
+	photos := make(chan Capture, 32)
 	go func() {
 		defer close(photos)
 		defer slog.Debug("tether stopped")
@@ -99,7 +103,7 @@ func Start(ctx context.Context) <-chan []byte {
 	return photos
 }
 
-func CaptureTethered(ctx context.Context, out chan<- []byte) error {
+func CaptureTethered(ctx context.Context, out chan<- Capture) error {
 	// Initialize libgphoto2 context
 	context := C.gp_context_new()
 	Logger.Debug("initialized libgphoto2 context")
@@ -142,13 +146,15 @@ func CaptureTethered(ctx context.Context, out chan<- []byte) error {
 		}
 
 		var file *C.CameraFile
-		errCode = C.capture_tethered_event(camera, context, &file)
+		var mimeType *C.char
+		errCode = C.capture_tethered_event(camera, context, &file, (**C.char)(unsafe.Pointer(&mimeType)))
 		if errCode != C.GP_OK {
 			consecutiveNoEvents++
 			continue
 		} else {
 			consecutiveNoEvents = 0
 		}
+		mimeTypeStr := C.GoString(mimeType)
 		Logger.Debug("received tether event")
 
 		// Retrieve the data from the file in memory
@@ -163,7 +169,10 @@ func CaptureTethered(ctx context.Context, out chan<- []byte) error {
 
 		// Convert data to a Go byte slice
 		imageData := C.GoBytes(unsafe.Pointer(data), C.int(size))
-		out <- imageData
+		out <- Capture{
+			Data:     imageData,
+			MimeType: mimeTypeStr,
+		}
 
 		// Free the file memory after download
 		C.gp_file_free(file)
