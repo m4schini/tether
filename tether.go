@@ -34,8 +34,8 @@ package tether
                }
 
                // Optionally delete the file from the camera after download
-               ret = gp_camera_file_delete(camera, filePath->folder, filePath->name, context);
-               if (ret < GP_OK) return ret;
+               // ret = gp_camera_file_delete(camera, filePath->folder, filePath->name, context);
+               // if (ret < GP_OK) return ret;
 
                return GP_OK;
            }
@@ -55,7 +55,6 @@ import "C"
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 	"unsafe"
@@ -63,8 +62,15 @@ import (
 
 var Logger *slog.Logger
 
+var (
+	FailedToGetDataErr    = errors.New("gp_file_get_data_and_size failed")
+	FailedToOpenCameraErr = errors.New("gp_camera_new failed")
+	CameraInitFailedErr   = errors.New("gp_camera_init failed")
+	CameraTetherFailedErr = errors.New("tether failed")
+)
+
 func Start(ctx context.Context) <-chan []byte {
-	photos := make(chan []byte, 8)
+	photos := make(chan []byte, 32)
 	go func() {
 		defer close(photos)
 		defer slog.Debug("tether stopped")
@@ -77,7 +83,14 @@ func Start(ctx context.Context) <-chan []byte {
 			}
 
 			err := CaptureTethered(ctx, photos)
-			if err != nil {
+			switch err {
+			case nil:
+				break
+			case CameraInitFailedErr:
+				Logger.Warn("camera tether failed. retrying in 10 second", slog.Any("err", err))
+				time.Sleep(10 * time.Second)
+				break
+			default:
 				Logger.Warn("camera tether failed. retrying in 1 second", slog.Any("err", err))
 				time.Sleep(1 * time.Second)
 			}
@@ -96,18 +109,23 @@ func CaptureTethered(ctx context.Context, out chan<- []byte) error {
 	var camera *C.Camera
 	errCode := C.gp_camera_new(&camera)
 	if errCode < C.GP_OK {
-		return fmt.Errorf("%v", C.GoString(C.gp_result_as_string(errCode)))
+		Logger.Debug("gp_camera_new failed", slog.String("err", C.GoString(C.gp_result_as_string(errCode))))
+		return FailedToOpenCameraErr
 	}
 	defer C.gp_camera_free(camera)
 
 	errCode = C.gp_camera_init(camera, context)
 	if errCode < C.GP_OK {
-		d := 10 * time.Second
-		time.Sleep(d)
-		return fmt.Errorf("%v", C.GoString(C.gp_result_as_string(errCode)))
+		//d := 10 * time.Second
+		//time.Sleep(d)
+		Logger.Debug("gp_camera_init failed", slog.String("err", C.GoString(C.gp_result_as_string(errCode))))
+		return CameraInitFailedErr
 	}
 	Logger.Debug("initialized camera")
-	defer C.gp_camera_exit(camera, context)
+	defer func() {
+		C.gp_camera_exit(camera, context)
+		Logger.Debug("camera exited")
+	}()
 
 	// Tethered capture loop
 	var consecutiveNoEvents int
@@ -119,7 +137,8 @@ func CaptureTethered(ctx context.Context, out chan<- []byte) error {
 		default:
 		}
 		if consecutiveNoEvents > 10 {
-			return errors.New("aborting because errors reached consecutive threshold")
+			Logger.Debug("aborting because errors reached consecutive threshold")
+			return CameraTetherFailedErr
 		}
 
 		var file *C.CameraFile
@@ -137,7 +156,8 @@ func CaptureTethered(ctx context.Context, out chan<- []byte) error {
 		var size C.ulong
 		errCode = C.gp_file_get_data_and_size(file, &data, &size)
 		if errCode < C.GP_OK {
-			return errors.New("failed to get photo")
+			Logger.Debug("gp_file_get_data_and_size failed", slog.Any("err", errCode))
+			return FailedToGetDataErr
 		}
 		Logger.Debug("downloaded image from tethered camera")
 

@@ -12,18 +12,32 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 var logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 	AddSource: false,
-	Level:     slog.LevelDebug,
+	Level:     slog.LevelWarn,
 }))
+
+func SetLogLevel(level slog.Level) {
+	logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		AddSource: false,
+		Level:     level,
+	}))
+}
 
 func main() {
 	tether.Logger = logger
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL, os.Kill, os.Interrupt)
 	defer cancel()
 	var outputDir = flag.String("output", "./tether", "photo download directory")
+	var logLevel = flag.Bool("verbose", false, "enable verbose log output")
+	if *logLevel {
+		SetLogLevel(slog.LevelDebug)
+	} else {
+		SetLogLevel(slog.LevelWarn)
+	}
 	flag.Parse()
 
 	err := os.MkdirAll(*outputDir, 0755)
@@ -32,9 +46,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	images := tether.Start(ctx)
 	var i int
-	for image := range images {
+	var start time.Time
+	for image := range tether.Start(ctx) {
+		start = time.Now()
 		imageFileName := filepath.Join(*outputDir, fmt.Sprintf("%v.jpg", i))
 		f, err := os.OpenFile(imageFileName, os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
@@ -48,8 +63,8 @@ func main() {
 			continue
 		}
 		f.Close()
-		logger.Info("wrote image to file", slog.Any("file", imageFileName))
-
+		logger.Debug("wrote image to file", slog.Any("file", imageFileName))
+		logger.Info("downloaded and saved photo", slog.Duration("duration", time.Since(start)))
 		i++
 	}
 }
